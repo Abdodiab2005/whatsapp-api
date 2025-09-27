@@ -2,9 +2,16 @@
 const { initAuthCreds, BufferJSON } = require("@whiskeysockets/baileys");
 const sqlite3 = require("sqlite3").verbose();
 const { promisify } = require("util");
+const fs = require("fs"); // <--- السطر الجديد الأول
 const path = require("path");
 
 const dbPath = path.join(__dirname, "session", "auth_info.db");
+
+// Ensure the session directory exists before connecting
+const sessionDir = path.dirname(dbPath);
+if (!fs.existsSync(sessionDir)) {
+  fs.mkdirSync(sessionDir, { recursive: true });
+}
 
 // Setup the database
 const db = new sqlite3.Database(dbPath, (err) => {
