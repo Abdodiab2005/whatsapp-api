@@ -4,14 +4,15 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@whiskeysockets/baileys": "^7.0.0-rc.3",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "chalk": "^4.1.2",
     "dotenv": "^17.2.2",
     "express": "^5.1.0",

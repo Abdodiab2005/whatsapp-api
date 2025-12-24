@@ -1,8 +1,8 @@
 // store.js
-const { initAuthCreds, BufferJSON } = require("@whiskeysockets/baileys");
+const { initAuthCreds, BufferJSON, proto } = require("@whiskeysockets/baileys");
 const sqlite3 = require("sqlite3").verbose();
 const { promisify } = require("util");
-const fs = require("fs"); // <--- السطر الجديد الأول
+const fs = require("fs");
 const path = require("path");
 
 const dbPath = path.join(__dirname, "session", "auth_info.db");
@@ -69,14 +69,18 @@ const useSQLiteAuthState = async () => {
   const keys = {
     /**
      * Gets a key from the store.
-     * @param {string} type - The type of key (e.g., 'pre-key', 'session').
+     * @param {string} type - The type of key (e.g., 'pre-key', 'session', 'lid-mapping', 'device-list', 'tctoken').
      * @param {string[]} ids - The IDs of the keys to retrieve.
      */
     get: async (type, ids) => {
       const data = {};
       for (const id of ids) {
         const key = `${type}-${id}`;
-        const value = await readData(key);
+        let value = await readData(key);
+        // Critical for v7: app-state-sync-key must be deserialized as protobuf object
+        if (type === "app-state-sync-key" && value) {
+          value = proto.Message.AppStateSyncKeyData.fromObject(value);
+        }
         if (value) {
           data[id] = value;
         }
