@@ -1,4 +1,4 @@
-const { errorResponse } = require("../utils/responseHandler");
+const AppError = require("../utils/AppError");
 
 /**
  * Middleware to authenticate requests using a static API key.
@@ -12,13 +12,13 @@ const authenticateApiKey = (req, res, next) => {
 
   // Check for API_KEY header
   if (!apiKey) {
-    return errorResponse(res, "Unauthorized: API key is missing.", 401);
+    return next(new AppError("Unauthorized: API key is missing.", 401));
   }
 
   // Check if the API key is valid
   if (apiKey !== expectedApiKey) {
     console.log(`API_KEY from env:\n${expectedApiKey} amnd current: ${apiKey}`);
-    return errorResponse(res, "Unauthorized: Invalid API key.", 401);
+    return next(new AppError("Unauthorized: Invalid API key.", 401));
   }
 
   next();

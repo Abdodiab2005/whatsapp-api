@@ -1,4 +1,6 @@
 node_modules
 .env
-src/utils/session
+session
 logs
+*.mp3
+*.mp4

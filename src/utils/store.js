@@ -5,12 +5,9 @@ const { promisify } = require("util");
 const fs = require("fs");
 const path = require("path");
 
-const dbPath = path.join(__dirname, "session", "auth_info.db");
-
-// Ensure the session directory exists before connecting
-const sessionDir = path.dirname(dbPath);
-if (!fs.existsSync(sessionDir)) {
-  fs.mkdirSync(sessionDir, { recursive: true });
+const dbPath = path.join(__dirname, "../../session", "auth_info.db");
+if (!fs.existsSync(path.dirname(dbPath))) {
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 }
 
 // Setup the database
@@ -29,7 +26,7 @@ const dbGet = promisify(db.get.bind(db));
 // Ensure the key-value table exists
 const createTable = async () => {
   await dbRun(
-    "CREATE TABLE IF NOT EXISTS auth_store (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    "CREATE TABLE IF NOT EXISTS auth_store (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   );
 };
 
@@ -47,7 +44,7 @@ const writeData = async (key, value) => {
   await dbRun(
     "INSERT OR REPLACE INTO auth_store (key, value) VALUES (?, ?)",
     key,
-    valueStr
+    valueStr,
   );
 };
 

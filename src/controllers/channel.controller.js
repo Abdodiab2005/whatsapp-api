@@ -1,127 +1,98 @@
 // controllers/channelController.js
-const whatsappService = require("../services/whatsapp.service");
-const logger = require("../utils/logger");
-const { successResponse, errorResponse } = require("../utils/responseHandler");
+const channelService = require("../services/channel.service");
+const AppError = require("../utils/AppError");
+const catchAsync = require("../utils/catchAsync");
 
-const getJid = async (req, res) => {
+/**
+ * Resolves a channel JID from an invite link.
+ */
+const getJid = catchAsync(async (req, res, next) => {
   const { link } = req.body;
   if (!link) {
-    return errorResponse(
-      res,
-      "Invite link is required.",
-      400,
-      "Invite link is required."
-    );
+    return next(new AppError("Invite link is required.", 400));
   }
 
-  try {
-    const inviteCode = link.split("/").pop();
-    const jid = await whatsappService.getJidFromInvite(inviteCode);
-    if (jid) {
-      return successResponse(res, { jid }, 200, "JID found successfully.");
-    } else {
-      return errorResponse(
-        res,
-        "Could not find JID for the given link.",
-        404,
-        "Could not find JID for the given link."
-      );
-    }
-  } catch (error) {
-    logger.error(error);
-    return errorResponse(
-      res,
-      "Failed to process the link.",
-      500,
-      "Failed to process the link."
-    );
-  }
-};
+  const jid = await channelService.getJidFromLink(link);
 
-const checkRole = async (req, res) => {
+  if (jid) {
+    res.status(200).json({
+      success: true,
+      data: { jid },
+      statusCode: 200,
+      message: "JID found successfully.",
+    });
+  } else {
+    return next(new AppError("Could not find JID for the given link.", 404));
+  }
+});
+
+/**
+ * Checks the authenticated user's role in a channel.
+ */
+const checkRole = catchAsync(async (req, res, next) => {
   const { link } = req.body;
   if (!link) {
-    return errorResponse(
-      res,
-      "Invite link is required.",
-      400,
-      "Invite link is required."
-    );
+    return next(new AppError("Invite link is required.", 400));
   }
 
-  try {
-    const inviteCode = link.split("/").pop();
-    const jid = await whatsappService.getJidFromInvite(inviteCode);
-    if (!jid) {
-      return errorResponse(
-        res,
-        "Channel not found for this link.",
-        404,
-        "Channel not found for this link."
-      );
-    }
-    const role = await whatsappService.getRoleInChannel(jid);
-    return successResponse(res, { role }, 200, "Role found successfully.");
-  } catch (error) {
-    logger.error(error);
-    return errorResponse(
-      res,
-      "Failed to check role.",
-      500,
-      "Failed to check role."
-    );
-  }
-};
+  const role = await channelService.checkRole(link);
 
-const sendMessage = async (req, res) => {
+  res.status(200).json({
+    success: true,
+    data: { role },
+    statusCode: 200,
+    message: "Role found successfully.",
+  });
+});
+
+/**
+ * Sends a text message to a channel.
+ */
+const sendMessage = catchAsync(async (req, res, next) => {
   const { link, message } = req.body;
-  if (!link || !message) {
-    return errorResponse(
-      res,
-      "Invite link and message are required.",
-      400,
-      "Invite link and message are required."
-    );
+  let { jid } = req.body;
+  if ((!link || !message) && !jid) {
+    return next(new AppError("Invite link and message are required.", 400));
   }
 
-  try {
-    const inviteCode = link.split("/").pop();
-    const jid = await whatsappService.getJidFromInvite(inviteCode);
-    if (!jid) {
-      return errorResponse(
-        res,
-        "Channel not found for this link.",
-        404,
-        "Channel not found for this link."
-      );
-    }
+  await channelService.sendMessage(link, jid, message);
 
-    const role = await whatsappService.getRoleInChannel(jid);
-    if (role !== "ADMIN" && role !== "OWNER") {
-      return errorResponse(
-        res,
-        "Forbidden. You are not an admin in this channel.",
-        403,
-        "Forbidden. You are not an admin in this channel."
-      );
-    }
+  res.status(200).json({
+    success: true,
+    data: { message: "Message sent successfully." },
+    statusCode: 200,
+    message: "Message sent successfully.",
+  });
+});
 
-    await whatsappService.sendChannelMessage(jid, message);
-    return successResponse(
-      res,
-      { message: "Message sent successfully." },
-      200,
-      "Message sent successfully."
-    );
-  } catch (error) {
-    logger.error(error);
-    return errorResponse(
-      res,
-      "Failed to send message.",
-      500,
-      "Failed to send message."
-    );
+/**
+ * Sends a media file (image, video, or voice note) to a channel.
+ */
+const sendMedia = catchAsync(async (req, res, next) => {
+  const { link, caption } = req.body;
+  let { jid } = req.body;
+  const ptt =
+    req.body.ptt === "true"
+      ? true
+      : req.body.ptt === "false"
+        ? false
+        : undefined;
+
+  if (!link) {
+    return next(new AppError("Invite link is required.", 400));
   }
-};
+  if (!req.file) {
+    return next(new AppError("A media file is required.", 400));
+  }
 
-module.exports = { getJid, checkRole, sendMessage };
+  await channelService.sendMedia(link, jid, req.file, caption, ptt);
+
+  res.status(200).json({
+    success: true,
+    data: { message: "Media sent successfully." },
+    statusCode: 200,
+    message: "Media sent successfully.",
+  });
+});
+
+module.exports = { getJid, checkRole, sendMessage, sendMedia };

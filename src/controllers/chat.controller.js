@@ -1,94 +1,72 @@
 // controllers/chatController.js
-const whatsappService = require("../services/whatsapp.service");
-const { validatePhoneNumber } = require("../utils/validator");
-const logger = require("../utils/logger");
-const { successResponse, errorResponse } = require("../utils/responseHandler");
+const chatService = require("../services/chat.service");
+const AppError = require("../utils/AppError");
+const catchAsync = require("../utils/catchAsync");
 
-const sendPrivateMessage = async (req, res) => {
+/**
+ * Sends a text message to a private chat.
+ */
+const sendPrivateMessage = catchAsync(async (req, res, next) => {
   const { number, message } = req.body;
   if (!number || !message) {
-    return errorResponse(
-      res,
-      "Phone number and message are required.",
-      400,
-      "Phone number and message are required."
-    );
+    return next(new AppError("Phone number and message are required.", 400));
   }
 
-  // 1. Validate phone number format
-  const validation = validatePhoneNumber(number);
-  if (!validation.isValid) {
-    return errorResponse(res, validation.error, 400, validation.error);
+  await chatService.sendPrivateMessage(number, message);
+
+  res.status(200).json({
+    success: true,
+    data: { message: "Message sent successfully." },
+    statusCode: 200,
+    message: "Message sent successfully.",
+  });
+});
+
+/**
+ * Sends a media file (image, video, or voice note) to a private chat.
+ */
+const sendMedia = catchAsync(async (req, res, next) => {
+  const { number, caption } = req.body;
+  const ptt =
+    req.body.ptt === "true"
+      ? true
+      : req.body.ptt === "false"
+        ? false
+        : undefined;
+
+  if (!number) {
+    return next(new AppError("Phone number is required.", 400));
   }
-  const { jid } = validation;
-
-  try {
-    // 2. Check if number exists on WhatsApp
-    const isOnWhatsApp = await whatsappService.isNumberOnWhatsApp(jid);
-    if (!isOnWhatsApp) {
-      return errorResponse(
-        res,
-        "This phone number is not on WhatsApp.",
-        404,
-        "This phone number is not on WhatsApp."
-      );
-    }
-
-    // 3. Send message
-    await whatsappService.sendPrivateMessage(jid, message);
-    return successResponse(
-      res,
-      { message: "Message sent successfully." },
-      200,
-      "Message sent successfully."
-    );
-  } catch (error) {
-    logger.error(error);
-    return errorResponse(
-      res,
-      "Failed to send message.",
-      500,
-      "Failed to send message."
-    );
+  if (!req.file) {
+    return next(new AppError("A media file is required.", 400));
   }
-};
 
-const isOnWhatsApp = async (req, res) => {
+  await chatService.sendMedia(number, req.file, caption, ptt);
+
+  res.status(200).json({
+    success: true,
+    data: { message: "Media sent successfully." },
+    statusCode: 200,
+    message: "Media sent successfully.",
+  });
+});
+
+/**
+ * Checks if a phone number is registered on WhatsApp.
+ */
+const isOnWhatsApp = catchAsync(async (req, res, next) => {
   const { number } = req.body;
   if (!number) {
-    return errorResponse(
-      res,
-      "Phone number is required.",
-      400,
-      "Phone number is required."
-    );
+    return next(new AppError("Phone number is required.", 400));
   }
 
-  // 1. Validate phone number format
-  const validation = validatePhoneNumber(number);
-  if (!validation.isValid) {
-    return errorResponse(res, validation.error, 400, validation.error);
-  }
-  const { jid } = validation;
+  const onWhatsApp = await chatService.checkIsOnWhatsApp(number);
+  res.status(200).json({
+    success: true,
+    data: { isOnWhatsApp: onWhatsApp },
+    statusCode: 200,
+    message: "Number exists on WhatsApp.",
+  });
+});
 
-  try {
-    // 2. Check if number exists on WhatsApp
-    const isOnWhatsApp = await whatsappService.isNumberOnWhatsApp(jid);
-    return successResponse(
-      res,
-      { isOnWhatsApp },
-      200,
-      "Number exists on WhatsApp."
-    );
-  } catch (error) {
-    logger.error(error);
-    return errorResponse(
-      res,
-      "Failed to check if number exists on WhatsApp.",
-      500,
-      "Failed to check if number exists on WhatsApp."
-    );
-  }
-};
-
-module.exports = { sendPrivateMessage, isOnWhatsApp };
+module.exports = { sendPrivateMessage, sendMedia, isOnWhatsApp };

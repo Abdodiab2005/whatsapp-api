@@ -5,6 +5,8 @@ const { connectToWhatsApp } = require("./src/whatsappClient");
 const channelRoutes = require("./src/routes/channel.routes");
 const chatRoutes = require("./src/routes/chat.routes");
 const { authenticateApiKey } = require("./src/middleware/auth.middleware");
+const { handleUploadError } = require("./src/middleware/upload.middleware");
+const globalErrorHandler = require("./src/middleware/error.middleware");
 const morgan = require("morgan");
 const chalk = require("chalk");
 
@@ -22,12 +24,12 @@ if (!API_KEY) {
 
     console.warn(
       chalk.yellow(
-        "API_KEY generated successfully\n⚠️ Please check the .env file and copy the API_KEY value to use it in header ⚠️"
-      )
+        "API_KEY generated successfully\n⚠️ Please check the .env file and copy the API_KEY value to use it in header ⚠️",
+      ),
     );
   } catch (error) {
     console.error(
-      chalk.red("🛑 API_KEY is not defined in the environment variables 🛑")
+      chalk.red("🛑 API_KEY is not defined in the environment variables 🛑"),
     );
     process.exit(1);
   }
@@ -55,9 +57,13 @@ app.use(authenticateApiKey);
 app.use("/channel", channelRoutes);
 app.use("/", chatRoutes);
 
+// Add global error handler
+app.use(handleUploadError);
+app.use(globalErrorHandler);
+
 // Start the WhatsApp client connection
 connectToWhatsApp().catch((err) =>
-  console.error("Failed to connect to WhatsApp:", err)
+  console.error("Failed to connect to WhatsApp:", err),
 );
 
 // Start the Express server
