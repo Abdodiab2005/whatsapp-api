@@ -1,0 +1,60 @@
+# Systemd unit for a bare-metal install.
+#
+#   sudo useradd --system --home /opt/whatsapp-api --shell /usr/sbin/nologin whatsapp
+#   sudo install -o whatsapp -g whatsapp -m 750 -d /opt/whatsapp-api
+#   # deploy the repo into /opt/whatsapp-api, then: npm ci --omit=dev
+#   sudo install -m 644 deploy/whatsapp-api.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now whatsapp-api
+#
+# The QR code appears on first start: journalctl -u whatsapp-api -f
+
+[Unit]
+Description=WhatsApp API (Baileys)
+Documentation=https://github.com/Abdodiab2005/whatsapp-api
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=whatsapp
+Group=whatsapp
+WorkingDirectory=/opt/whatsapp-api
+ExecStart=/usr/bin/node index.js
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/whatsapp-api/.env
+
+# The app closes its SQLite stores and drains the send queue on SIGTERM, and
+# forces exit after 10s of its own. Give it a little more than that.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+Restart=always
+RestartSec=5
+
+# One process per WhatsApp session. Do not add a second instance of this unit
+# against the same session directory.
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=whatsapp-api
+
+# Hardening. session/ holds the WhatsApp credentials, so keep it the only
+# writable path.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/opt/whatsapp-api/session
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
