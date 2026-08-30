@@ -1,15 +1,5 @@
 const AppError = require("../utils/AppError");
-
-function readInteger(environment, name, fallback, { min, max }) {
-  const value = environment[name];
-  if (value == null || value === "") return fallback;
-
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
-    throw new Error(`${name} must be an integer between ${min} and ${max}.`);
-  }
-  return parsed;
-}
+const { readInteger } = require("../utils/env");
 
 function createRateLimiter({
   windowMs,

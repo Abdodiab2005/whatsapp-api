@@ -4,7 +4,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-24.x-brightgreen.svg)](.nvmrc)
 
-Free, self-hosted, open source. This is a Node.js Express server that acts as an API for a WhatsApp account using the Baileys library. It allows you to send messages to channels and private chats programmatically.
+Free, self-hosted, open source. A Node.js REST API for a WhatsApp account, built
+on [Baileys](https://github.com/WhiskeySockets/Baileys). Send text, image, video,
+and voice-note messages to **WhatsApp Channels** and private chats
+programmatically, with live channel authorization, idempotent sends, rate
+limiting, and a Docker or systemd deployment.
 
 > [!WARNING]
 > Baileys is an unofficial WhatsApp Web client. WhatsApp can change the protocol or restrict the linked account without notice. Do not use this API for unsolicited or bulk messaging, and use the official WhatsApp Business Cloud API when an outage or account ban is unacceptable.
@@ -68,6 +72,11 @@ Free, self-hosted, open source. This is a Node.js Express server that acts as an
 | `LOG_LEVEL` | `info` | Pino log level. |
 | `LOG_FILE` | unset | Optional log file; rotate it outside this application. |
 
+Every variable above is validated when the process starts. An out-of-range or
+mistyped value **crashes at boot with a message naming the variable** rather
+than silently reverting to the default, so a typo cannot leave the server
+running with limits nobody chose.
+
 ## Deployment
 
 ### Docker
@@ -126,6 +135,7 @@ purpose: it would let any client forge its IP and bypass those limits.
 - Treat the API key as a shared bearer secret and rotate it if exposed. Built-in limits apply per client IP and across the shared key; keep stricter edge limits and an IP allow-list at the reverse proxy.
 - HTTP rate buckets are intentionally in-process for this single-instance server and reset on restart; the reverse proxy should enforce the durable perimeter limit.
 - Keep `.env`, `session/`, terminal QR output, and logs private. They can grant access to the API or linked account.
+- Configuration is validated at startup, so a bad value fails the deploy instead of the first request. Watch for a startup crash naming a variable after changing the environment.
 - `GET /channel` queries WhatsApp live on every request for the account's subscribed newsletters and returns only the `ADMIN`/`OWNER` ones. It never falls back to locally discovered channels: a failed query is reported as an error. Listed roles can still go stale between the listing and a send, so both channel send routes re-fetch the current role after their queue delay.
 - WhatsApp username lookup is still protocol/rollout dependent. It is checked live for every resolution or send and never falls back to a stale cached username target.
 - Channel delivery remains sensitive to upstream WhatsApp protocol changes. The API uses rc14's streaming upload hook and performs a fresh authorization check, but [Baileys has a current channel text/media stability report](https://github.com/WhiskeySockets/Baileys/issues/2687); smoke-test a private channel after Baileys or WhatsApp updates.
@@ -210,13 +220,14 @@ src/
   controllers/              Request validation and response envelopes
   services/                 Business logic (channel authorization, sends, resolution)
   middleware/               Auth, rate limits, idempotency, upload handling, error envelope
-  utils/                    Baileys adapters, validators, media preview data, SQLite stores
+  utils/                    Baileys adapters, validators, media preview data, SQLite stores, config parsing
 scripts/
   seedApiKey.js             First-run API key generation
   checkDocs.js              Fails the build when the docs drift from the code
 test/                       node:test suites
 postman/                    Runnable collection and environment
 deploy/                     systemd unit
+.github/                    CI, Dependabot, PR and issue templates
 ```
 
 ## Key Technologies
@@ -246,7 +257,8 @@ npm audit --omit=dev
 
 CI runs `biome ci`, the test suite, the docs check, and a production `npm audit`
 on every push and pull request, plus a Docker build that boots the image and
-probes both health routes.
+probes both health routes. Dependabot opens grouped weekly update PRs for npm,
+GitHub Actions, and the Docker base image.
 
 ## Postman
 
