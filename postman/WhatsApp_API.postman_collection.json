@@ -1,0 +1,1776 @@
+{
+  "info": {
+    "_postman_id": "51a9d954-d99e-4d75-b1ab-dce41af58ca6",
+    "name": "WhatsApp API (Baileys rc14)",
+    "description": "Complete collection for the self-hosted WhatsApp API.\n\n## Setup\n1. Import this collection and `WhatsApp_API_Local.postman_environment.json`.\n2. Select the **WhatsApp API - Local** environment.\n3. Set `apiKey` to the value in the server's `.env`.\n4. Start the server and wait for WhatsApp to connect.\n5. Replace the sample phone, username, LID, and channel variables with real test targets.\n\n## Idempotency\nEvery send example owns a separate collection variable. Its pre-request script generates the key once and preserves it for exact retries. To create a different intended message, clear that request's `...IdempotencyKey` collection variable before sending the changed request. Never reuse an existing key with changed content or target.\n\n## Recipient and channel selectors\nPrivate endpoints accept exactly one of `number`, `jid`, `lid`, or `username`. Channel endpoints accept exactly one of `link`, `jid`, or `handle`. Do not combine selectors.\n\n## Channel listing\n`GET /channel` queries WhatsApp live on every request for the account's subscribed newsletters and returns only the channels whose current role is ADMIN or OWNER. Nothing is served from history sync, incoming events, or a local catalog, and a failed query returns an error instead of stale data. Listed roles can still change afterwards, so send endpoints perform a fresh ADMIN/OWNER check immediately before delivery.\n\n## Media\nAfter importing, use Postman's **Body → form-data → file** picker to choose the media file. Files are intentionally not embedded in this portable collection.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "x-api-key",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{apiKey}}",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('Response does not expose Express', function () {",
+          "  pm.expect(pm.response.headers.has('X-Powered-By')).to.eql(false);",
+          "});",
+          "pm.test('Response is not cacheable', function () {",
+          "  pm.expect(pm.response.headers.get('Cache-Control')).to.eql('no-store');",
+          "});",
+          "pm.test('Rate-limit headers are present', function () {",
+          "  pm.expect(pm.response.headers.has('RateLimit-Limit')).to.eql(true);",
+          "  pm.expect(pm.response.headers.has('RateLimit-Remaining')).to.eql(true);",
+          "  pm.expect(pm.response.headers.has('RateLimit-Reset')).to.eql(true);",
+          "});",
+          "const contentType = pm.response.headers.get('Content-Type') || '';",
+          "if (contentType.includes('application/json')) {",
+          "  const responseBody = pm.response.json();",
+          "  pm.test('JSON uses the standard response envelope', function () {",
+          "    pm.expect(responseBody).to.be.an('object');",
+          "    pm.expect(responseBody.success).to.be.a('boolean');",
+          "    pm.expect(responseBody.statusCode).to.eql(pm.response.code);",
+          "    pm.expect(responseBody.message).to.be.a('string');",
+          "  });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "System",
+      "description": "Public server health and HTTP boundary checks.",
+      "item": [
+        {
+          "name": "Health Check",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Server reports healthy', function () {",
+                  "  pm.expect(pm.response.text()).to.eql('WhatsApp API Server is running!');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                ""
+              ]
+            },
+            "description": "Public liveness endpoint. It confirms the HTTP server is running; it does not prove the WhatsApp socket is connected."
+          }
+        },
+        {
+          "name": "Health Probe (WhatsApp link state)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Probe answers 200 when linked, 503 when not', function () { pm.expect(pm.response.code).to.be.oneOf([200, 503]); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Link state is reported', function () {",
+                  "  pm.expect(data.whatsapp).to.be.oneOf(['connected', 'disconnected']);",
+                  "  pm.expect(data.uptimeSeconds).to.be.a('number');",
+                  "});",
+                  "if (data.whatsapp !== 'connected') { console.log('WhatsApp is not linked yet. Send requests will return 503 until the QR code is scanned.'); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/healthz",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "healthz"
+              ]
+            },
+            "description": "Unauthenticated readiness probe. Returns 200 only while the WhatsApp socket is connected, so it is the right target for a container healthcheck. Run it before any send request."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Private Recipients",
+      "description": "Registration and identity resolution. Resolution requests are read-only and do not require an Idempotency-Key.",
+      "item": [
+        {
+          "name": "Check WhatsApp Registration (Phone)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "const body = pm.response.json();",
+                  "pm.test('Registration result is boolean', function () {",
+                  "  pm.expect(body.data.isOnWhatsApp).to.be.a('boolean');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"number\": \"{{phoneNumber}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/isOnWhatsApp",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "isOnWhatsApp"
+              ]
+            },
+            "description": "Legacy phone-only registration check. Use Resolve Recipient for PN JIDs, LIDs, and usernames."
+          }
+        },
+        {
+          "name": "Resolve Recipient by Phone",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Resolved identity contains a delivery JID', function () {",
+                  "  pm.expect(data.jid).to.match(/@(s\\.whatsapp\\.net|lid|hosted|hosted\\.lid)$/);",
+                  "});",
+                  "pm.collectionVariables.set('resolvedUserJid', data.jid);",
+                  "if (data.lid) pm.collectionVariables.set('userLid', data.lid);",
+                  "if (data.phoneNumber) pm.collectionVariables.set('phoneJid', data.phoneNumber);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"number\": \"{{phoneNumber}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/resolve-recipient",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "resolve-recipient"
+              ]
+            },
+            "description": "Checks the phone with WhatsApp, resolves its current identity, and stores returned JIDs in collection variables."
+          }
+        },
+        {
+          "name": "Resolve Recipient by PN JID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Resolved identity contains a delivery JID', function () { pm.expect(data.jid).to.be.a('string'); });",
+                  "pm.collectionVariables.set('resolvedUserJid', data.jid);",
+                  "if (data.lid) pm.collectionVariables.set('userLid', data.lid);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jid\": \"{{phoneJid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/resolve-recipient",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "resolve-recipient"
+              ]
+            },
+            "description": "Resolves a phone-number JID and prefers the persisted LID mapping when available."
+          }
+        },
+        {
+          "name": "Resolve Recipient by LID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('LID remains the delivery identity', function () {",
+                  "  pm.expect(data.jid).to.match(/@(lid|hosted\\.lid)$/);",
+                  "  pm.expect(data.lid).to.eql(data.jid);",
+                  "});",
+                  "pm.collectionVariables.set('resolvedUserJid', data.jid);",
+                  "if (data.phoneNumber) pm.collectionVariables.set('phoneJid', data.phoneNumber);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"lid\": \"{{userLid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/resolve-recipient",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "resolve-recipient"
+              ]
+            },
+            "description": "Resolves a direct `@lid` or `@hosted.lid` identity. A reverse phone mapping can be null when it has not been synchronized."
+          }
+        },
+        {
+          "name": "Resolve Recipient by Username",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Username was resolved live', function () {",
+                  "  pm.expect(data.jid).to.be.a('string');",
+                  "  pm.expect(data.username).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('resolvedUserJid', data.jid);",
+                  "if (data.lid) pm.collectionVariables.set('userLid', data.lid);",
+                  "if (data.phoneNumber) pm.collectionVariables.set('phoneJid', data.phoneNumber);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/resolve-recipient",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "resolve-recipient"
+              ]
+            },
+            "description": "Performs a live rc14 USync lookup. A 404 can mean the username is unavailable to the linked account or the feature is not rolled out."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Private Messaging",
+      "description": "Private text and media sends. Each request accepts exactly one recipient selector and maintains a dedicated Idempotency-Key.",
+      "item": [
+        {
+          "name": "Send Text by Phone",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const keyName = 'privateTextPhoneIdempotencyKey';",
+                  "if (!pm.collectionVariables.get(keyName)) {",
+                  "  pm.collectionVariables.set(keyName, pm.variables.replaceIn('{{$guid}}'));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Idempotency outcome is explicit', function () {",
+                  "  pm.expect(pm.response.headers.get('Idempotency-Status')).to.be.oneOf(['created', 'replayed']);",
+                  "});",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Recipient identity is returned', function () { pm.expect(data.recipient.jid).to.be.a('string'); });",
+                  "if (data.messageId) pm.collectionVariables.set('lastMessageId', data.messageId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{privateTextPhoneIdempotencyKey}}",
+                "description": "Preserved for exact retries. Clear the collection variable before sending a different intended message."
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"number\": \"{{phoneNumber}}\",\n  \"message\": \"{{messageText}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/send",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "send"
+              ]
+            },
+            "description": "Validates a phone number with WhatsApp, prefers its LID mapping, then sends text."
+          }
+        },
+        {
+          "name": "Send Text by PN JID",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const keyName = 'privateTextJidIdempotencyKey';",
+                  "if (!pm.collectionVariables.get(keyName)) {",
+                  "  pm.collectionVariables.set(keyName, pm.variables.replaceIn('{{$guid}}'));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Idempotency outcome is explicit', function () { pm.expect(pm.response.headers.get('Idempotency-Status')).to.be.oneOf(['created', 'replayed']); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Recipient identity is returned', function () { pm.expect(data.recipient.jid).to.be.a('string'); });",
+                  "if (data.messageId) pm.collectionVariables.set('lastMessageId', data.messageId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{privateTextJidIdempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jid\": \"{{phoneJid}}\",\n  \"message\": \"{{messageText}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/send",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "send"
+              ]
+            },
+            "description": "Sends to an already-resolved `@s.whatsapp.net` JID. The service still prefers the mapped LID when one is known."
+          }
+        },
+        {
+          "name": "Send Text by LID",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const keyName = 'privateTextLidIdempotencyKey';",
+                  "if (!pm.collectionVariables.get(keyName)) {",
+                  "  pm.collectionVariables.set(keyName, pm.variables.replaceIn('{{$guid}}'));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Idempotency outcome is explicit', function () { pm.expect(pm.response.headers.get('Idempotency-Status')).to.be.oneOf(['created', 'replayed']); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('LID recipient is returned', function () { pm.expect(data.recipient.jid).to.match(/@(lid|hosted\\.lid)$/); });",
+                  "if (data.messageId) pm.collectionVariables.set('lastMessageId', data.messageId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{privateTextLidIdempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"lid\": \"{{userLid}}\",\n  \"message\": \"{{messageText}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/send",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "send"
+              ]
+            },
+            "description": "Sends directly to an `@lid` or `@hosted.lid` recipient."
+          }
+        },
+        {
+          "name": "Send Text by Username",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const keyName = 'privateTextUsernameIdempotencyKey';",
+                  "if (!pm.collectionVariables.get(keyName)) {",
+                  "  pm.collectionVariables.set(keyName, pm.variables.replaceIn('{{$guid}}'));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Idempotency outcome is explicit', function () { pm.expect(pm.response.headers.get('Idempotency-Status')).to.be.oneOf(['created', 'replayed']); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Resolved username is returned', function () { pm.expect(data.recipient.username).to.be.a('string'); });",
+                  "if (data.messageId) pm.collectionVariables.set('lastMessageId', data.messageId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{privateTextUsernameIdempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"message\": \"{{messageText}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/send",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "send"
+              ]
+            },
+            "description": "Resolves the username live for this attempt, then sends to the returned identity."
+          }
+        },
+        {
+          "name": "Send Media by Phone",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const keyName = 'privateMediaIdempotencyKey';",
+                  "if (!pm.collectionVariables.get(keyName)) {",
+                  "  pm.collectionVariables.set(keyName, pm.variables.replaceIn('{{$guid}}'));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Idempotency outcome is explicit', function () { pm.expect(pm.response.headers.get('Idempotency-Status')).to.be.oneOf(['created', 'replayed']); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Media response includes recipient identity', function () { pm.expect(data.recipient.jid).to.be.a('string'); });",
+                  "if (data.messageId) pm.collectionVariables.set('lastMessageId', data.messageId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{privateMediaIdempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "number",
+                  "value": "{{phoneNumber}}",
+                  "type": "text",
+                  "description": "Use exactly one recipient selector. Rename this field to jid, lid, or username when testing another selector."
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Select a recognized image, video, or audio file (maximum 64 MB)."
+                },
+                {
+                  "key": "caption",
+                  "value": "{{mediaCaption}}",
+                  "type": "text",
+                  "description": "Used for image/video and ignored for audio."
+                },
+                {
+                  "key": "ptt",
+                  "value": "false",
+                  "type": "text",
+                  "description": "Use true only for OGG/Opus voice notes."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/send-media",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "send-media"
+              ]
+            },
+            "description": "Choose the file after import. The server validates its binary signature rather than trusting its extension or client MIME type."
+          }
+        },
+        {
+          "name": "Send Voice Note (PTT) by Phone",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const keyName = 'privateVoiceNoteIdempotencyKey';",
+                  "if (!pm.collectionVariables.get(keyName)) {",
+                  "  pm.collectionVariables.set(keyName, pm.variables.replaceIn('{{$guid}}'));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Idempotency outcome is explicit', function () { pm.expect(pm.response.headers.get('Idempotency-Status')).to.be.oneOf(['created', 'replayed']); });",
+                  "const data = pm.response.json().data;",
+                  "if (data.messageId) pm.collectionVariables.set('lastMessageId', data.messageId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{privateVoiceNoteIdempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "number",
+                  "value": "{{phoneNumber}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Select an OGG/Opus file. Other audio containers are rejected for PTT."
+                },
+                {
+                  "key": "ptt",
+                  "value": "true",
+                  "type": "text",
+                  "description": "Delivers the audio as a WhatsApp voice note."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/send-media",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "send-media"
+              ]
+            },
+            "description": "Voice-note variant of the media send. `ptt=true` requires OGG/Opus audio; captions are ignored for audio."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Channels",
+      "description": "Channel discovery, live role checks, and ADMIN/OWNER-authorized text/media sends.",
+      "item": [
+        {
+          "name": "Fetch Publishable Channels (Live)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Live channel list is paginated', function () {",
+                  "  pm.expect(data.channels).to.be.an('array');",
+                  "  pm.expect(data.pagination.total).to.be.a('number');",
+                  "  pm.expect(data.channels.length).to.be.at.most(data.pagination.limit);",
+                  "});",
+                  "pm.test('Only ADMIN or OWNER channels are returned', function () {",
+                  "  data.channels.forEach(function (channel) {",
+                  "    pm.expect(channel.role).to.be.oneOf(['ADMIN', 'OWNER']);",
+                  "    pm.expect(channel.jid).to.match(/^\\d{10,30}@newsletter$/);",
+                  "  });",
+                  "});",
+                  "pm.test('Optional metadata is present as a field, even when null', function () {",
+                  "  data.channels.forEach(function (channel) {",
+                  "    ['name', 'description', 'handle', 'invite', 'subscribers', 'verification', 'picture'].forEach(function (field) {",
+                  "      pm.expect(channel).to.have.property(field);",
+                  "    });",
+                  "  });",
+                  "});",
+                  "if (data.channels.length > 0) {",
+                  "  const channel = data.channels[0];",
+                  "  pm.collectionVariables.set('channelJid', channel.jid);",
+                  "  if (channel.handle) pm.collectionVariables.set('channelHandle', channel.handle);",
+                  "} else {",
+                  "  console.log('No ADMIN/OWNER channel is subscribed on this account. An empty list is a valid success.');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/channel?limit={{channelLimit}}&offset={{channelOffset}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "{{channelLimit}}",
+                  "description": "1-100"
+                },
+                {
+                  "key": "offset",
+                  "value": "{{channelOffset}}",
+                  "description": "0-1000000"
+                }
+              ]
+            },
+            "description": "Queries WhatsApp live for the account's subscribed newsletters and returns only the channels it can publish to (role ADMIN or OWNER). `total` counts the authorized channels only. An empty list is a successful response, not an error. `502` means the live query failed or returned a malformed list; `503` means the WhatsApp socket is not connected. If a row exists, the first row updates `channelJid` and `channelHandle` for later requests."
+          }
+        },
+        {
+          "name": "Resolve Channel JID by Invite Link",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "const jid = pm.response.json().data.jid;",
+                  "pm.test('Newsletter JID is returned', function () { pm.expect(jid).to.match(/^\\d{10,30}@newsletter$/); });",
+                  "pm.collectionVariables.set('channelJid', jid);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"link\": \"{{channelLink}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/channel/get-jid",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel",
+                "get-jid"
+              ]
+            },
+            "description": "Resolves a strict `https://whatsapp.com/channel/...` invite and stores the returned JID."
+          }
+        },
+        {
+          "name": "Resolve Channel JID by Known Handle",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "const jid = pm.response.json().data.jid;",
+                  "pm.test('Newsletter JID is returned', function () { pm.expect(jid).to.match(/^\\d{10,30}@newsletter$/); });",
+                  "pm.collectionVariables.set('channelJid', jid);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"handle\": \"{{channelHandle}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/channel/get-jid",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel",
+                "get-jid"
+              ]
+            },
+            "description": "Matches the handle against the account's live subscription list, then returns that channel's JID. Handles of channels this account is not subscribed to return `404`."
+          }
+        },
+        {
+          "name": "Check Current Role by JID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Role result is internally consistent', function () {",
+                  "  pm.expect(data.role).to.be.oneOf(['ADMIN', 'OWNER', 'SUBSCRIBER', 'GUEST']);",
+                  "  pm.expect(data.isAdmin).to.eql(['ADMIN', 'OWNER'].includes(data.role));",
+                  "});",
+                  "pm.collectionVariables.set('channelJid', data.jid);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jid\": \"{{channelJid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/channel/check-role",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel",
+                "check-role"
+              ]
+            },
+            "description": "Fetches current viewer metadata. This endpoint reports the role; send endpoints independently re-check it after their queue delay."
+          }
+        },
+        {
+          "name": "Check Current Role by Invite Link",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Role result is internally consistent', function () {",
+                  "  pm.expect(data.role).to.be.oneOf(['ADMIN', 'OWNER', 'SUBSCRIBER', 'GUEST']);",
+                  "  pm.expect(data.isAdmin).to.eql(['ADMIN', 'OWNER'].includes(data.role));",
+                  "});",
+                  "pm.collectionVariables.set('channelJid', data.jid);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"link\": \"{{channelLink}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/channel/check-role",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel",
+                "check-role"
+              ]
+            },
+            "description": "Resolves the invite and returns the live role for the linked account."
+          }
+        },
+        {
+          "name": "Check Current Role by Handle",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "const data = pm.response.json().data;",
+                  "pm.test('Role and admin flag agree', function () {",
+                  "  pm.expect(data.isAdmin).to.eql(data.role === 'ADMIN' || data.role === 'OWNER');",
+                  "});",
+                  "pm.collectionVariables.set('channelJid', data.jid);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"handle\": \"{{channelHandle}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/channel/check-role",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel",
+                "check-role"
+              ]
+            },
+            "description": "Resolves the handle through the live subscription list, then reads the current role from fresh channel metadata."
+          }
+        },
+        {
+          "name": "Send Channel Text by JID",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const keyName = 'channelTextJidIdempotencyKey';",
+                  "if (!pm.collectionVariables.get(keyName)) {",
+                  "  pm.collectionVariables.set(keyName, pm.variables.replaceIn('{{$guid}}'));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Idempotency outcome is explicit', function () { pm.expect(pm.response.headers.get('Idempotency-Status')).to.be.oneOf(['created', 'replayed']); });",
+                  "const data = pm.response.json().data;",
+                  "if (data.messageId) pm.collectionVariables.set('lastMessageId', data.messageId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{channelTextJidIdempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jid\": \"{{channelJid}}\",\n  \"message\": \"{{channelMessageText}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/channel/send",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel",
+                "send"
+              ]
+            },
+            "description": "The server fetches fresh channel metadata inside the send queue. Only ADMIN or OWNER proceeds to `sendMessage`; other roles receive 403."
+          }
+        },
+        {
+          "name": "Send Channel Text by Known Handle",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const keyName = 'channelTextHandleIdempotencyKey';",
+                  "if (!pm.collectionVariables.get(keyName)) {",
+                  "  pm.collectionVariables.set(keyName, pm.variables.replaceIn('{{$guid}}'));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Idempotency outcome is explicit', function () { pm.expect(pm.response.headers.get('Idempotency-Status')).to.be.oneOf(['created', 'replayed']); });",
+                  "const data = pm.response.json().data;",
+                  "if (data.messageId) pm.collectionVariables.set('lastMessageId', data.messageId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{channelTextHandleIdempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"handle\": \"{{channelHandle}}\",\n  \"message\": \"{{channelMessageText}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/channel/send",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel",
+                "send"
+              ]
+            },
+            "description": "Uses a catalog handle, revalidates that handle against live metadata, then performs the fresh ADMIN/OWNER check immediately before send."
+          }
+        },
+        {
+          "name": "Send Channel Text by Invite Link",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const keyName = 'channelTextLinkIdempotencyKey';",
+                  "if (!pm.collectionVariables.get(keyName)) {",
+                  "  pm.collectionVariables.set(keyName, pm.variables.replaceIn('{{$guid}}'));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Idempotency outcome is explicit', function () { pm.expect(pm.response.headers.get('Idempotency-Status')).to.be.oneOf(['created', 'replayed']); });",
+                  "const data = pm.response.json().data;",
+                  "if (data.messageId) pm.collectionVariables.set('lastMessageId', data.messageId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{channelTextLinkIdempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"link\": \"{{channelLink}}\",\n  \"message\": \"{{channelMessageText}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/channel/send",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel",
+                "send"
+              ]
+            },
+            "description": "Resolves the invite link to a JID, then re-authorizes ADMIN/OWNER inside the send queue immediately before delivery. A non-publisher role returns `403`."
+          }
+        },
+        {
+          "name": "Send Channel Media by JID",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const keyName = 'channelMediaIdempotencyKey';",
+                  "if (!pm.collectionVariables.get(keyName)) {",
+                  "  pm.collectionVariables.set(keyName, pm.variables.replaceIn('{{$guid}}'));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Idempotency outcome is explicit', function () { pm.expect(pm.response.headers.get('Idempotency-Status')).to.be.oneOf(['created', 'replayed']); });",
+                  "const data = pm.response.json().data;",
+                  "if (data.messageId) pm.collectionVariables.set('lastMessageId', data.messageId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{channelMediaIdempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "jid",
+                  "value": "{{channelJid}}",
+                  "type": "text",
+                  "description": "Use exactly one selector. Rename this field to link or handle when testing another selector."
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Select a recognized image, video, or audio file (maximum 64 MB)."
+                },
+                {
+                  "key": "caption",
+                  "value": "{{mediaCaption}}",
+                  "type": "text"
+                },
+                {
+                  "key": "ptt",
+                  "value": "false",
+                  "type": "text",
+                  "description": "Use true only for OGG/Opus voice notes."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/channel/send-media",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel",
+                "send-media"
+              ]
+            },
+            "description": "The current role is fetched after the queue delay and before media upload. Non-ADMIN/OWNER requests fail with 403 without uploading or sending."
+          }
+        },
+        {
+          "name": "Send Channel Media by Handle",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const keyName = 'channelMediaHandleIdempotencyKey';",
+                  "if (!pm.collectionVariables.get(keyName)) {",
+                  "  pm.collectionVariables.set(keyName, pm.variables.replaceIn('{{$guid}}'));",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () { pm.response.to.have.status(200); });",
+                  "pm.test('Idempotency outcome is explicit', function () { pm.expect(pm.response.headers.get('Idempotency-Status')).to.be.oneOf(['created', 'replayed']); });",
+                  "const data = pm.response.json().data;",
+                  "if (data.messageId) pm.collectionVariables.set('lastMessageId', data.messageId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{channelMediaHandleIdempotencyKey}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "handle",
+                  "value": "{{channelHandle}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Select a recognized image, video, or audio file (maximum 64 MB)."
+                },
+                {
+                  "key": "caption",
+                  "value": "{{mediaCaption}}",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/channel/send-media",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel",
+                "send-media"
+              ]
+            },
+            "description": "Uploads through the newsletter media hosts. The handle is matched live, and the role is re-checked immediately before the upload and send."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Validation & Errors",
+      "description": "Safe negative checks. Every request here is rejected before any WhatsApp delivery, so the folder can be run end to end.",
+      "item": [
+        {
+          "name": "Unauthorized Request (no API key)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 401', function () { pm.response.to.have.status(401); });",
+                  "pm.test('Error envelope is returned', function () { pm.expect(pm.response.json().success).to.eql(false); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"number\": \"{{phoneNumber}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/isOnWhatsApp",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "isOnWhatsApp"
+              ]
+            },
+            "description": "Confirms the API key gate. The collection-level API key auth is disabled for this request only."
+          }
+        },
+        {
+          "name": "Unknown Route",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 404', function () { pm.response.to.have.status(404); });",
+                  "pm.test('Route is named in the message', function () { pm.expect(pm.response.json().message).to.include('Route not found'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/does-not-exist",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "does-not-exist"
+              ]
+            },
+            "description": "Confirms unmatched routes return the JSON error envelope."
+          }
+        },
+        {
+          "name": "Invalid Channel Pagination",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('Limit range is explained', function () { pm.expect(pm.response.json().message).to.include('limit'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/channel?limit=500&offset=0",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "channel"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "500",
+                  "description": "Above the 100 maximum"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "`limit` accepts 1-100 and `offset` accepts 0-1000000. Anything else is rejected before WhatsApp is queried."
+          }
+        },
+        {
+          "name": "Conflicting Recipient Selectors",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('Exactly one selector is required', function () { pm.expect(pm.response.json().message).to.include('exactly one'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"number\": \"{{phoneNumber}}\",\n  \"lid\": \"{{userLid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/resolve-recipient",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "resolve-recipient"
+              ]
+            },
+            "description": "Private endpoints accept exactly one of `number`, `jid`, `lid`, or `username`."
+          }
+        },
+        {
+          "name": "Missing Idempotency Key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 400', function () { pm.response.to.have.status(400); });",
+                  "pm.test('Header requirement is explained', function () { pm.expect(pm.response.json().message).to.include('Idempotency-Key'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"number\": \"{{phoneNumber}}\",\n  \"message\": \"{{messageText}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/send",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "send"
+              ]
+            },
+            "description": "Every send route requires `Idempotency-Key`. The request is rejected before the recipient is resolved, so nothing is delivered."
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "apiKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "phoneNumber",
+      "value": "+201001234567",
+      "type": "string"
+    },
+    {
+      "key": "phoneJid",
+      "value": "201001234567@s.whatsapp.net",
+      "type": "string"
+    },
+    {
+      "key": "userLid",
+      "value": "123456789012345@lid",
+      "type": "string"
+    },
+    {
+      "key": "username",
+      "value": "@example.user",
+      "type": "string"
+    },
+    {
+      "key": "resolvedUserJid",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "messageText",
+      "value": "Hello from the self-hosted WhatsApp API!",
+      "type": "string"
+    },
+    {
+      "key": "channelLink",
+      "value": "https://whatsapp.com/channel/REPLACE_ME",
+      "type": "string"
+    },
+    {
+      "key": "channelJid",
+      "value": "120363123456789012@newsletter",
+      "type": "string"
+    },
+    {
+      "key": "channelHandle",
+      "value": "example.channel",
+      "type": "string"
+    },
+    {
+      "key": "channelMessageText",
+      "value": "Channel update from the self-hosted WhatsApp API!",
+      "type": "string"
+    },
+    {
+      "key": "mediaCaption",
+      "value": "Sent through the self-hosted WhatsApp API",
+      "type": "string"
+    },
+    {
+      "key": "channelLimit",
+      "value": "50",
+      "type": "string"
+    },
+    {
+      "key": "channelOffset",
+      "value": "0",
+      "type": "string"
+    },
+    {
+      "key": "lastMessageId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "privateTextPhoneIdempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "privateTextLidIdempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "privateTextUsernameIdempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "privateMediaIdempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "channelTextJidIdempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "channelTextHandleIdempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "channelMediaIdempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "privateTextJidIdempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "privateVoiceNoteIdempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "channelTextLinkIdempotencyKey",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "channelMediaHandleIdempotencyKey",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}
