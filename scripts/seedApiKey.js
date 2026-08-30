@@ -1,9 +1,46 @@
-// scripts/seedApiKey.js (The new, better version)
-const fs = require("fs");
-const crypto = require("crypto");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const dotenv = require("dotenv");
 
-const newApiKey = crypto.randomBytes(32).toString("hex");
-fs.appendFileSync(".env", `\nAPI_KEY=${newApiKey}\n`);
+const defaultEnvPath = path.join(__dirname, "..", ".env");
 
-// The most important change is here 👇
-module.exports = newApiKey;
+function ensureApiKey(envPath = defaultEnvPath) {
+  let content = "";
+  try {
+    content = fs.readFileSync(envPath, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+
+  const existingApiKey = dotenv.parse(content).API_KEY;
+  if (existingApiKey) {
+    fs.chmodSync(envPath, 0o600);
+    return existingApiKey;
+  }
+
+  const newApiKey = crypto.randomBytes(32).toString("hex");
+  const lines = content
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*API_KEY\s*=/.test(line));
+  while (lines.at(-1) === "") lines.pop();
+  lines.push(`API_KEY=${newApiKey}`);
+
+  const temporaryPath = `${envPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporaryPath, `${lines.join("\n")}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    fs.renameSync(temporaryPath, envPath);
+    fs.chmodSync(envPath, 0o600);
+  } catch (error) {
+    fs.rmSync(temporaryPath, { force: true });
+    throw error;
+  }
+
+  return newApiKey;
+}
+
+module.exports = { ensureApiKey };

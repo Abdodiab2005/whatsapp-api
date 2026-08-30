@@ -1,0 +1,43 @@
+services:
+  whatsapp-api:
+    build: .
+    image: whatsapp-api:local
+    container_name: whatsapp-api
+    restart: unless-stopped
+
+    environment:
+      # Required. Generate one with: openssl rand -hex 32
+      # Without it the app writes a generated key into .env, which the
+      # read-only container image cannot do.
+      API_KEY: ${API_KEY:?set API_KEY in .env or the environment}
+      PORT: "3000"
+      # Set to the number of trusted reverse proxies in front of this service.
+      # Leave unset when the port is reachable directly.
+      TRUST_PROXY: ${TRUST_PROXY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+    # Bind to loopback only. Terminate TLS and enforce perimeter limits in a
+    # reverse proxy; this service does not do either.
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    # WhatsApp credentials and the idempotency ledger. Back this up.
+    volumes:
+      - session:/app/session
+
+    # One process per WhatsApp session — never scale this service.
+    deploy:
+      replicas: 1
+
+    # The QR code is printed to the log on first run:
+    #   docker compose logs -f whatsapp-api
+    stdin_open: true
+    tty: true
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  session:

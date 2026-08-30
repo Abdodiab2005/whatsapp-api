@@ -1,4 +1,5 @@
 // utils/media.js
+const logger = require("./logger");
 
 /**
  * Supported media type categories mapped to their baileys message keys.
@@ -53,7 +54,7 @@ function isPttCompatible(mimetype) {
 /**
  * Builds a baileys-compatible media message payload from a multer file object.
  *
- * @param {Object} file - The multer file object (must have `buffer` and `mimetype`).
+ * @param {Object} file - The multer file object (must have `path` or `buffer`, plus `mimetype`).
  * @param {Object} [options] - Additional options.
  * @param {string} [options.caption] - Optional caption (applies to image/video only).
  * @param {boolean} [options.ptt] - Force PTT on/off. If omitted, auto-detects from codec.
@@ -68,7 +69,7 @@ function buildMediaMessage(file, { caption, ptt } = {}) {
   }
 
   const message = {
-    [mediaType]: file.buffer,
+    [mediaType]: file.path ? { url: file.path } : file.buffer,
     mimetype: file.mimetype,
   };
 
@@ -79,8 +80,9 @@ function buildMediaMessage(file, { caption, ptt } = {}) {
     const compatible = isPttCompatible(file.mimetype);
     if (typeof ptt === "boolean") {
       if (ptt && !compatible) {
-        console.warn(
-          `[media] ptt=true requested but ${file.mimetype} is not PTT-compatible (requires ogg/opus). Sending as regular audio instead.`,
+        logger.warn(
+          { mimetype: file.mimetype },
+          "PTT requested for incompatible media; sending regular audio",
         );
         message.ptt = false;
       } else {
@@ -99,45 +101,10 @@ function buildMediaMessage(file, { caption, ptt } = {}) {
   return message;
 }
 
-/**
- * Fixes the directPath for newsletter media uploads.
- *
- * WhatsApp's CDN returns directPath starting with /o1/ for standard uploads,
- * but newsletters require /m1/ prefix for media to display correctly.
- * This is a known baileys issue where newsletter media uploads succeed (200)
- * but images/videos/audio don't render in the channel.
- *
- * @param {Object} message - The baileys protobuf message object.
- * @returns {Object} The message with corrected directPath for newsletters.
- */
-function patchNewsletterDirectPath(message) {
-  if (!message) return message;
-
-  const mediaTypes = [
-    "imageMessage",
-    "videoMessage",
-    "audioMessage",
-    "documentMessage",
-    "stickerMessage",
-  ];
-
-  for (const type of mediaTypes) {
-    if (message[type]?.directPath) {
-      const original = message[type].directPath;
-      if (original.startsWith("/o1/")) {
-        message[type].directPath = original.replace(/^\/o1\//, "/m1/");
-      }
-    }
-  }
-
-  return message;
-}
-
 module.exports = {
   getMediaType,
   isPttCompatible,
   buildMediaMessage,
-  patchNewsletterDirectPath,
   MAX_FILE_SIZE,
   ALLOWED_MIME_PREFIXES,
 };

@@ -1,19 +1,42 @@
-const AppError = require("../utils/AppError");
 const logger = require("../utils/logger");
 
-const globalErrorHandler = (err, req, res, next) => {
-  err.statusCode = err.statusCode || 500;
-  err.status = err.status || "error";
+// Arity 4 is what marks this as an Express error handler; `_next` must stay.
+const globalErrorHandler = (err, req, res, _next) => {
+  if (err.idempotencyStatus) {
+    res.set("Idempotency-Status", err.idempotencyStatus);
+  }
+  const statusCode =
+    Number.isInteger(err.statusCode) &&
+    err.statusCode >= 400 &&
+    err.statusCode <= 599
+      ? err.statusCode
+      : 500;
+  const invalidJson = err instanceof SyntaxError && err.status === 400;
+  const isOperational = err.isOperational === true;
 
-  if (err.statusCode === 500) {
-    logger.error(err);
+  if (statusCode >= 500 && !isOperational) {
+    logger.error(
+      { err, method: req.method, path: req.originalUrl },
+      "Request failed",
+    );
+  } else if (statusCode >= 500) {
+    logger.warn(
+      { method: req.method, path: req.originalUrl, statusCode },
+      "Request rejected",
+    );
   }
 
-  res.status(err.statusCode).json({
+  const safeMessage = invalidJson
+    ? "Invalid JSON body."
+    : isOperational
+      ? err.message
+      : "Internal server error";
+
+  return res.status(statusCode).json({
     success: false,
-    error: err.message,
-    statusCode: err.statusCode,
-    message: err.isOperational ? err.message : "Internal server error",
+    error: safeMessage,
+    statusCode,
+    message: safeMessage,
   });
 };
 

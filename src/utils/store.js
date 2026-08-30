@@ -1,114 +1,145 @@
-// store.js
 const { initAuthCreds, BufferJSON, proto } = require("@whiskeysockets/baileys");
-const sqlite3 = require("sqlite3").verbose();
-const { promisify } = require("util");
-const fs = require("fs");
-const path = require("path");
+const { DatabaseSync } = require("node:sqlite");
+const fs = require("node:fs");
+const path = require("node:path");
 
-const dbPath = path.join(__dirname, "../../session", "auth_info.db");
-if (!fs.existsSync(path.dirname(dbPath))) {
-  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-}
+const DEFAULT_DB_PATH = path.join(__dirname, "../../session", "auth_info.db");
 
-// Setup the database
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error("Failed to connect to SQLite database.", err);
-  } else {
-    console.log("Successfully connected to SQLite database.");
+let defaultAuthState;
+
+function prepareDatabase(databasePath) {
+  if (databasePath !== ":memory:") {
+    const directory = path.dirname(databasePath);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
   }
-});
 
-// Promisify DB methods for async/await usage
-const dbRun = promisify(db.run.bind(db));
-const dbGet = promisify(db.get.bind(db));
+  const database = new DatabaseSync(databasePath, { timeout: 5000 });
 
-// Ensure the key-value table exists
-const createTable = async () => {
-  await dbRun(
+  if (databasePath !== ":memory:") {
+    fs.chmodSync(databasePath, 0o600);
+  }
+
+  database.exec("PRAGMA journal_mode = WAL");
+  database.exec("PRAGMA synchronous = FULL");
+  database.exec(
     "CREATE TABLE IF NOT EXISTS auth_store (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
   );
-};
 
-// Core functions to interact with the DB
-const readData = async (key) => {
-  const result = await dbGet("SELECT value FROM auth_store WHERE key = ?", key);
-  if (result?.value) {
-    return JSON.parse(result.value, BufferJSON.reviver);
-  }
-  return null;
-};
+  return database;
+}
 
-const writeData = async (key, value) => {
-  const valueStr = JSON.stringify(value, BufferJSON.replacer);
-  await dbRun(
-    "INSERT OR REPLACE INTO auth_store (key, value) VALUES (?, ?)",
-    key,
-    valueStr,
+function createSQLiteAuthState(databasePath = DEFAULT_DB_PATH) {
+  const database = prepareDatabase(databasePath);
+  const readStatement = database.prepare(
+    "SELECT value FROM auth_store WHERE key = ?",
   );
-};
+  const readManyStatement = database.prepare(
+    "SELECT key, value FROM auth_store WHERE key IN (SELECT value FROM json_each(?))",
+  );
+  const upsertStatement = database.prepare(
+    `INSERT INTO auth_store (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  );
+  const deleteStatement = database.prepare(
+    "DELETE FROM auth_store WHERE key = ?",
+  );
+  const clearKeysStatement = database.prepare(
+    "DELETE FROM auth_store WHERE key != 'creds'",
+  );
 
-const removeData = async (key) => {
-  await dbRun("DELETE FROM auth_store WHERE key = ?", key);
-};
+  function readData(key) {
+    const result = readStatement.get(key);
+    return result ? JSON.parse(result.value, BufferJSON.reviver) : null;
+  }
 
-/**
- * This function creates a store that mimics the official 'useMultiFileAuthState'
- * but uses SQLite as the backend.
- */
-const useSQLiteAuthState = async () => {
-  await createTable(); // Ensure table exists before we start
+  function writeData(key, value) {
+    upsertStatement.run(key, JSON.stringify(value, BufferJSON.replacer));
+  }
 
-  // 1. Read the credentials from the database
-  let creds = (await readData("creds")) || initAuthCreds();
-
-  // 2. Create the key store object with the required methods
-  const keys = {
-    /**
-     * Gets a key from the store.
-     * @param {string} type - The type of key (e.g., 'pre-key', 'session', 'lid-mapping', 'device-list', 'tctoken').
-     * @param {string[]} ids - The IDs of the keys to retrieve.
-     */
-    get: async (type, ids) => {
-      const data = {};
-      for (const id of ids) {
-        const key = `${type}-${id}`;
-        let value = await readData(key);
-        // Critical for v7: app-state-sync-key must be deserialized as protobuf object
-        if (type === "app-state-sync-key" && value) {
-          value = proto.Message.AppStateSyncKeyData.fromObject(value);
-        }
-        if (value) {
-          data[id] = value;
-        }
+  function runTransaction(operation) {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      operation();
+      database.exec("COMMIT");
+    } catch (error) {
+      try {
+        database.exec("ROLLBACK");
+      } catch (rollbackError) {
+        error.rollbackError = rollbackError;
       }
+      throw error;
+    }
+  }
+
+  const creds = readData("creds") || initAuthCreds();
+  const keys = {
+    get: async (type, ids) => {
+      const data = Object.create(null);
+      if (ids.length === 0) return data;
+
+      const idByKey = new Map(ids.map((id) => [`${type}-${id}`, id]));
+      const rows = readManyStatement.all(JSON.stringify([...idByKey.keys()]));
+
+      for (const row of rows) {
+        const id = idByKey.get(row.key);
+        const value = JSON.parse(row.value, BufferJSON.reviver);
+
+        data[id] =
+          type === "app-state-sync-key"
+            ? proto.Message.AppStateSyncKeyData.fromObject(value)
+            : value;
+      }
+
       return data;
     },
-    /**
-     * Sets keys in the store.
-     * @param {object} data - The data to set, formatted as { 'pre-key': { 1: keyData, 2: keyData } }.
-     */
     set: async (data) => {
-      const tasks = [];
-      for (const type in data) {
-        for (const id in data[type]) {
-          const value = data[type][id];
-          const key = `${type}-${id}`;
-          tasks.push(value ? writeData(key, value) : removeData(key));
+      runTransaction(() => {
+        for (const [type, entries] of Object.entries(data)) {
+          for (const [id, value] of Object.entries(entries || {})) {
+            const key = `${type}-${id}`;
+            if (value == null) {
+              deleteStatement.run(key);
+            } else {
+              writeData(key, value);
+            }
+          }
         }
-      }
-      await Promise.all(tasks);
+      });
+    },
+    clear: async () => {
+      clearKeysStatement.run();
     },
   };
 
+  let closed = false;
   return {
     state: { creds, keys },
-    saveCreds: () => {
-      // The 'creds.update' event listener will update the creds object in memory.
-      // This function is called to persist it to the database.
-      return writeData("creds", creds);
+    saveCreds: async () => writeData("creds", creds),
+    close: () => {
+      if (!closed) {
+        database.close();
+        closed = true;
+      }
     },
   };
-};
+}
 
-module.exports = { useSQLiteAuthState };
+async function useSQLiteAuthState() {
+  if (!defaultAuthState) {
+    defaultAuthState = createSQLiteAuthState();
+  }
+  return defaultAuthState;
+}
+
+function closeSQLiteAuthState() {
+  defaultAuthState?.close();
+  defaultAuthState = undefined;
+}
+
+module.exports = {
+  DEFAULT_DB_PATH,
+  createSQLiteAuthState,
+  useSQLiteAuthState,
+  closeSQLiteAuthState,
+};

@@ -1,14 +1,34 @@
-// services/whatsappService.js
-const { createReadStream } = require("fs");
+const {
+  encodeBase64EncodedStringForUpload,
+  generateWAMessage,
+  isHostedLidUser,
+  isHostedPnUser,
+  isLidUser,
+  isPnUser,
+  jidNormalizedUser,
+  USyncQuery,
+  USyncUser,
+  uploadWithNodeHttp,
+} = require("@whiskeysockets/baileys");
+const {
+  executeWMexQuery,
+} = require("@whiskeysockets/baileys/lib/Socket/mex.js");
 const { getClient } = require("../whatsappClient");
-const { buildMediaMessage } = require("../utils/media");
+const { buildMediaMessage, getMediaType } = require("../utils/media");
+const { attachMediaMetadata } = require("../utils/mediaMetadata");
+const { enqueueSend } = require("../utils/sendQueue");
+const AppError = require("../utils/AppError");
+const {
+  channelHandle,
+  channelRole,
+  isPublisherRole,
+} = require("../utils/channel");
+const { validateUserJid } = require("../utils/validator");
 const logger = require("../utils/logger");
 
-/**
- * Newsletter-specific media upload path map.
- * WhatsApp uses /newsletter/newsletter-{type} for channel media,
- * which returns /m1/ directPaths. Regular /mms/{type} returns /o1/ paths.
- */
+const SUBSCRIBED_NEWSLETTERS_QUERY_ID = "6388546374527196";
+const SUBSCRIBED_NEWSLETTERS_DATA_PATH = "xwa2_newsletter_subscribed";
+
 const NEWSLETTER_MEDIA_PATH_MAP = {
   image: "/newsletter/newsletter-image",
   video: "/newsletter/newsletter-video",
@@ -17,191 +37,438 @@ const NEWSLETTER_MEDIA_PATH_MAP = {
   sticker: "/newsletter/newsletter-image",
 };
 
-const REGULAR_MEDIA_PATH_MAP = {
-  image: "/mms/image",
-  video: "/mms/video",
-  document: "/mms/document",
-  audio: "/mms/audio",
-  sticker: "/mms/image",
-};
-
-/**
- * Creates a newsletter-specific upload function that wraps the standard
- * upload but uses /newsletter/newsletter-{type}/ CDN paths.
- *
- * @param {Object} sock - The baileys socket instance.
- * @returns {Function} Upload function compatible with baileys' upload interface.
- */
-function createNewsletterUpload(sock) {
+function createNewsletterUpload(sock, uploadFile = uploadWithNodeHttp) {
   return async (filePath, { mediaType, fileEncSha256B64, timeoutMs }) => {
-    const mediaConn = await sock.refreshMediaConn();
-    const hosts = mediaConn.hosts;
-    const auth = encodeURIComponent(mediaConn.auth);
+    const newsletterPath = NEWSLETTER_MEDIA_PATH_MAP[mediaType];
+    if (!newsletterPath) {
+      throw new Error(`Unsupported newsletter media type: ${mediaType}`);
+    }
 
-    const {
-      encodeBase64EncodedStringForUpload,
-    } = require("@whiskeysockets/baileys");
     const encodedHash = encodeBase64EncodedStringForUpload(fileEncSha256B64);
 
-    const newsletterPath =
-      NEWSLETTER_MEDIA_PATH_MAP[mediaType] || REGULAR_MEDIA_PATH_MAP[mediaType];
+    for (let refreshAttempt = 0; refreshAttempt < 2; refreshAttempt += 1) {
+      const mediaConn = await sock.refreshMediaConn(refreshAttempt > 0);
+      const auth = encodeURIComponent(mediaConn.auth);
 
-    let urls;
-    for (const { hostname } of hosts) {
-      const url = `https://${hostname}${newsletterPath}/${encodedHash}?auth=${auth}&token=${encodedHash}`;
-      logger.info(
-        { hostname, path: newsletterPath, mediaType },
-        "Uploading newsletter media",
-      );
+      for (const { hostname } of mediaConn.hosts) {
+        const url = `https://${hostname}${newsletterPath}/${encodedHash}?auth=${auth}&token=${encodedHash}`;
+        logger.debug(
+          { hostname, path: newsletterPath, mediaType },
+          "Uploading newsletter media",
+        );
 
-      try {
-        const stream = createReadStream(filePath);
-        const response = await fetch(url, {
-          method: "POST",
-          body: stream,
-          headers: {
-            "Content-Type": "application/octet-stream",
-            Origin: "https://web.whatsapp.com",
-          },
-          duplex: "half",
-          signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
-        });
-
-        let result;
         try {
-          result = await response.json();
-        } catch {
-          result = undefined;
-        }
+          const result = await uploadFile({
+            url,
+            filePath,
+            headers: {
+              "Content-Type": "application/octet-stream",
+              Origin: "https://web.whatsapp.com",
+            },
+            timeoutMs,
+          });
 
-        logger.info(
-          { hostname, result: JSON.stringify(result) },
-          "Newsletter upload response",
-        );
+          if (result?.url || result?.direct_path || result?.directPath) {
+            logger.debug(
+              { hostname, mediaType },
+              "Newsletter media upload completed",
+            );
+            return {
+              mediaUrl: result.url || result.mediaUrl,
+              directPath: result.direct_path || result.directPath,
+              meta_hmac: result.meta_hmac,
+              fbid: result.fbid,
+              ts: result.ts,
+            };
+          }
 
-        if (result?.url || result?.directPath || result?.direct_path) {
-          urls = {
-            mediaUrl: result.url,
-            directPath: result.direct_path,
-            meta_hmac: result.meta_hmac,
-            fbid: result.fbid,
-            ts: result.ts,
-          };
-          break;
-        } else {
-          logger.warn({ hostname, result }, "Newsletter upload failed on host");
+          logger.warn(
+            { hostname, mediaType },
+            "Newsletter media upload returned no media path",
+          );
+        } catch (error) {
+          logger.warn(
+            { hostname, mediaType, errorCode: error.code },
+            "Newsletter media upload failed",
+          );
         }
-      } catch (error) {
-        logger.warn(
-          { hostname, error: error.message },
-          "Newsletter upload error",
-        );
       }
     }
 
-    if (!urls) {
-      throw new Error("Newsletter media upload failed on all hosts");
-    }
-
-    return urls;
+    throw new Error("Newsletter media upload failed on all hosts");
   };
 }
 
-// ─── Standard service methods ────────────────────────────────────────────────
+function dependencyError(message, cause) {
+  const error = new AppError(message, 502);
+  error.cause = cause;
+  error.idempotencySafeToRetry = true;
+  return error;
+}
+
+async function fetchNewsletterMetadata(sock, type, key) {
+  try {
+    return await sock.newsletterMetadata(type, key);
+  } catch (error) {
+    throw dependencyError("Unable to fetch WhatsApp channel metadata.", error);
+  }
+}
+
+/**
+ * WhatsApp answers the subscribed-newsletters query with a bare array, but the
+ * MEX payload has been seen wrapped in a container object, so accept both.
+ */
+function toSubscribedChannelArray(response) {
+  if (Array.isArray(response)) return response;
+  if (Array.isArray(response?.newsletters)) return response.newsletters;
+  if (Array.isArray(response?.newsletter)) return response.newsletter;
+  if (Array.isArray(response?.[SUBSCRIBED_NEWSLETTERS_DATA_PATH])) {
+    return response[SUBSCRIBED_NEWSLETTERS_DATA_PATH];
+  }
+  return null;
+}
+
+/**
+ * Fetches every newsletter the connected account is subscribed to straight
+ * from WhatsApp. There is no local fallback on purpose: a stale catalog must
+ * never stand in for live authorization data.
+ */
+async function fetchSubscribedChannels(sock = getClient()) {
+  let response;
+  try {
+    response = await executeWMexQuery(
+      {},
+      SUBSCRIBED_NEWSLETTERS_QUERY_ID,
+      SUBSCRIBED_NEWSLETTERS_DATA_PATH,
+      (node) => sock.query(node),
+      () => sock.generateMessageTag(),
+    );
+  } catch (error) {
+    throw dependencyError(
+      "Unable to fetch the subscribed WhatsApp channels.",
+      error,
+    );
+  }
+
+  const channels = toSubscribedChannelArray(response);
+  if (!channels) {
+    const error = new AppError(
+      "WhatsApp returned a malformed subscribed channel list.",
+      502,
+    );
+    error.idempotencySafeToRetry = true;
+    throw error;
+  }
+
+  logger.debug({ count: channels.length }, "Fetched subscribed channels");
+  return channels;
+}
+
+const getNewsletterMetadata = (type, key) =>
+  fetchNewsletterMetadata(getClient(), type, key);
 
 const getJidFromInvite = async (inviteCode) => {
-  const sock = getClient();
-  const metadata = await sock.newsletterMetadata("invite", inviteCode);
+  const metadata = await getNewsletterMetadata("invite", inviteCode);
   return metadata?.id || null;
 };
 
 const getRoleInChannel = async (jid) => {
-  const sock = getClient();
-  const metadata = await sock.newsletterMetadata("jid", jid);
-  return metadata?.viewer_metadata?.role || null;
+  const metadata = await getNewsletterMetadata("jid", jid);
+  if (!metadata) throw new AppError("WhatsApp channel not found.", 404);
+  return channelRole(metadata);
 };
 
 const isNumberOnWhatsApp = async (jid) => {
   const sock = getClient();
-  const [result] = await sock.onWhatsApp(jid);
+  const [result] = (await sock.onWhatsApp(jid)) ?? [];
   return result?.exists || false;
 };
 
-const sendMessage = async (jid, text) => {
-  const sock = getClient();
-  const result = await sock.sendMessage(jid, { text });
-  logger.info({ jid, messageId: result?.key?.id }, "Text message sent");
-  return result;
-};
+function normalizeResolvedUserJid(jid) {
+  const normalized = jidNormalizedUser(jid);
+  const validation = validateUserJid(normalized);
+  return validation.isValid ? validation.jid : null;
+}
+
+async function lookupUsername(sock, username) {
+  const query = new USyncQuery()
+    .withContactProtocol()
+    .withUsernameProtocol()
+    .withUser(new USyncUser().withUsername(username));
+
+  let result;
+  try {
+    result = await sock.executeUSyncQuery(query);
+  } catch (error) {
+    throw dependencyError("WhatsApp username lookup failed.", error);
+  }
+
+  const match = result?.list?.find(
+    (entry) => entry.contact === true && normalizeResolvedUserJid(entry.id),
+  );
+  if (!match) throw new AppError("WhatsApp username was not found.", 404);
+
+  return {
+    jid: normalizeResolvedUserJid(match.id),
+    username: typeof match.username === "string" ? match.username : username,
+  };
+}
+
+async function resolvePhoneJid(sock, jid) {
+  let results;
+  try {
+    results = await sock.onWhatsApp(jid);
+  } catch (error) {
+    throw dependencyError("Unable to validate the WhatsApp recipient.", error);
+  }
+
+  const match = results?.find((entry) => entry.exists === true);
+  if (!match) {
+    throw new AppError("This recipient is not on WhatsApp.", 404);
+  }
+  return normalizeResolvedUserJid(match.jid) ?? jid;
+}
+
+async function enrichUserIdentity(sock, jid, username) {
+  const normalizedJid = normalizeResolvedUserJid(jid);
+  if (!normalizedJid) throw new AppError("Invalid WhatsApp recipient.", 400);
+
+  let lid = null;
+  let phoneNumber = null;
+  if (isLidUser(normalizedJid) || isHostedLidUser(normalizedJid)) {
+    lid = normalizedJid;
+    try {
+      phoneNumber = normalizeResolvedUserJid(
+        await sock.signalRepository.lidMapping.getPNForLID(normalizedJid),
+      );
+    } catch (error) {
+      logger.debug(
+        { err: error, jid: normalizedJid },
+        "LID reverse lookup failed",
+      );
+    }
+  } else {
+    phoneNumber = normalizedJid;
+    try {
+      lid = normalizeResolvedUserJid(
+        await sock.signalRepository.lidMapping.getLIDForPN(normalizedJid),
+      );
+    } catch (error) {
+      logger.debug({ err: error, jid: normalizedJid }, "LID lookup failed");
+    }
+  }
+
+  const identity = {
+    jid: lid ?? normalizedJid,
+    lid,
+    phoneNumber,
+    username: username ?? null,
+  };
+  return identity;
+}
+
+async function resolveUserIdentifier(recipient, sock = getClient()) {
+  if (recipient.type === "username") {
+    const result = await lookupUsername(sock, recipient.username);
+    return enrichUserIdentity(sock, result.jid, result.username);
+  }
+
+  const jid = recipient.jid;
+  const phoneJid = isPnUser(jid) || isHostedPnUser(jid);
+  const resolvedJid = phoneJid ? await resolvePhoneJid(sock, jid) : jid;
+  return enrichUserIdentity(sock, resolvedJid);
+}
 
 function isNewsletterJid(jid) {
   return jid?.endsWith("@newsletter");
 }
 
-/**
- * Sends a media message to any JID.
- *
- * For newsletters: temporarily replaces sock.waUploadToServer with a
- * newsletter-specific version that uses /newsletter/ CDN paths.
- * This allows baileys' own sendMessage to handle the full pipeline
- * (generateWAMessage → relayMessage) with the correct upload path.
- *
- * @param {string} jid - The recipient JID.
- * @param {Object} file - The multer file object (buffer + mimetype).
- * @param {Object} [options] - Additional options.
- * @param {string} [options.caption] - Optional caption for image/video.
- * @param {boolean} [options.ptt] - Force PTT on/off for audio.
- */
-const sendMediaMessage = async (jid, file, { caption, ptt } = {}) => {
-  const sock = getClient();
-  const content = buildMediaMessage(file, { caption, ptt });
+async function assertNewsletterAdmin(sock, jid, options) {
+  const metadata = await fetchNewsletterMetadata(sock, "jid", jid);
+  if (!metadata) throw new AppError("WhatsApp channel not found.", 404);
 
-  logger.info(
-    {
-      jid,
-      mimetype: file.mimetype,
-      size: file.size,
-      mediaKeys: Object.keys(content),
-      isNewsletter: isNewsletterJid(jid),
-    },
-    "Preparing media message",
-  );
-
-  if (isNewsletterJid(jid)) {
-    // Monkey-patch: temporarily swap the upload function so baileys'
-    // own sendMessage pipeline uses newsletter CDN paths end-to-end.
-    const originalUpload = sock.waUploadToServer;
-    const newsletterUpload = createNewsletterUpload(sock);
-
-    try {
-      sock.waUploadToServer = newsletterUpload;
-
-      const result = await sock.sendMessage(jid, content);
-
-      logger.info(
-        { jid, messageId: result?.key?.id },
-        "Newsletter media message sent via patched upload",
-      );
-      return result;
-    } finally {
-      // Always restore original upload function
-      sock.waUploadToServer = originalUpload;
-    }
+  if (
+    options?.expectedHandle &&
+    channelHandle(metadata) !== options.expectedHandle
+  ) {
+    throw new AppError(
+      "Channel handle changed before the message could be sent.",
+      409,
+    );
   }
 
-  // For regular chats/groups, use sock.sendMessage directly
-  const result = await sock.sendMessage(jid, content);
-  logger.info(
-    { jid, messageId: result?.key?.id, status: result?.status },
-    "Chat media message sent",
-  );
-  return result;
+  const role = channelRole(metadata);
+  if (!isPublisherRole(role)) {
+    throw new AppError(
+      "Forbidden. The connected WhatsApp account is not an admin or owner of this channel.",
+      403,
+    );
+  }
+  return { metadata, role };
+}
+
+/**
+ * Mirrors Baileys' own stanza `mediatype` attribute. Baileys computes it for
+ * every message but drops it on the newsletter branch, so channel media leaves
+ * without the attribute WhatsApp uses to route and render it.
+ */
+function newsletterMediaTypeAttribute(message) {
+  if (message?.imageMessage) return "image";
+  if (message?.videoMessage) {
+    return message.videoMessage.gifPlayback ? "gif" : "video";
+  }
+  if (message?.audioMessage) {
+    return message.audioMessage.ptt ? "ptt" : "audio";
+  }
+  if (message?.stickerMessage) return "sticker";
+  if (message?.documentMessage) return "document";
+  return null;
+}
+
+async function performAuthorizedNewsletterSend(
+  sock,
+  jid,
+  content,
+  options,
+  behavior,
+) {
+  await assertNewsletterAdmin(sock, jid, behavior);
+  return sock.sendMessage(jid, content, options);
+}
+
+/**
+ * Newsletter media cannot go through `sock.sendMessage`: that path relays the
+ * stanza without the `mediatype` attribute. This builds the same message and
+ * relays it with the attribute attached.
+ */
+async function performAuthorizedNewsletterMediaSend(
+  sock,
+  jid,
+  content,
+  behavior,
+  upload = createNewsletterUpload(sock),
+) {
+  await assertNewsletterAdmin(sock, jid, behavior);
+
+  const fullMessage = await generateWAMessage(jid, content, {
+    userJid: sock.user?.id,
+    upload,
+    logger: sock.logger,
+  });
+
+  const mediatype = newsletterMediaTypeAttribute(fullMessage.message);
+  await sock.relayMessage(jid, fullMessage.message, {
+    messageId: fullMessage.key.id,
+    additionalAttributes: mediatype ? { mediatype } : {},
+  });
+
+  return fullMessage;
+}
+
+const sendNewsletterMessage = (jid, text, behavior) =>
+  enqueueSend(async () => {
+    const sock = getClient();
+    const result = await performAuthorizedNewsletterSend(
+      sock,
+      jid,
+      { text },
+      undefined,
+      behavior,
+    );
+    logger.info(
+      { jid, messageId: result?.key?.id },
+      "Newsletter text message sent",
+    );
+    return result;
+  });
+
+const sendNewsletterMediaMessage = (
+  jid,
+  file,
+  { caption, ptt, expectedHandle } = {},
+) => {
+  const content = buildMediaMessage(file, { caption, ptt });
+  const mediaType = getMediaType(file.mimetype);
+
+  return enqueueSend(async () => {
+    const sock = getClient();
+    await attachMediaMetadata(content, file, mediaType);
+    const result = await performAuthorizedNewsletterMediaSend(
+      sock,
+      jid,
+      content,
+      { expectedHandle },
+    );
+    logger.info(
+      {
+        jid,
+        messageId: result?.key?.id,
+        mediaType,
+        hasThumbnail: content.jpegThumbnail !== undefined,
+      },
+      "Newsletter media message sent",
+    );
+    return result;
+  });
+};
+
+const sendMessage = (jid, text) => {
+  if (isNewsletterJid(jid)) return sendNewsletterMessage(jid, text);
+
+  return enqueueSend(async () => {
+    const sock = getClient();
+    const result = await sock.sendMessage(jid, { text });
+    logger.info({ jid, messageId: result?.key?.id }, "Text message sent");
+    return result;
+  });
+};
+
+const sendMediaMessage = (jid, file, { caption, ptt } = {}) => {
+  if (isNewsletterJid(jid)) {
+    return sendNewsletterMediaMessage(jid, file, { caption, ptt });
+  }
+  const content = buildMediaMessage(file, { caption, ptt });
+  const mediaType = getMediaType(file.mimetype);
+
+  return enqueueSend(async () => {
+    const sock = getClient();
+    await attachMediaMetadata(content, file, mediaType);
+    logger.info(
+      {
+        jid,
+        mimetype: file.mimetype,
+        size: file.size,
+        mediaKeys: Object.keys(content),
+        isNewsletter: false,
+      },
+      "Preparing media message",
+    );
+
+    const result = await sock.sendMessage(jid, content);
+
+    logger.info(
+      { jid, messageId: result?.key?.id, status: result?.status },
+      "Media message sent",
+    );
+    return result;
+  });
 };
 
 module.exports = {
+  assertNewsletterAdmin,
+  createNewsletterUpload,
+  newsletterMediaTypeAttribute,
+  performAuthorizedNewsletterMediaSend,
+  fetchSubscribedChannels,
   getJidFromInvite,
+  getNewsletterMetadata,
   getRoleInChannel,
   isNumberOnWhatsApp,
+  lookupUsername,
+  performAuthorizedNewsletterSend,
+  resolveUserIdentifier,
   sendMessage,
   sendMediaMessage,
+  sendNewsletterMediaMessage,
+  sendNewsletterMessage,
 };

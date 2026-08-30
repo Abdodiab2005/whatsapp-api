@@ -1,33 +1,68 @@
-// utils/logger.js
+const path = require("node:path");
 const pino = require("pino");
-const path = require("path");
 
-// Define the transport with multiple targets: one for the console, one for the file.
-const transport = pino.transport({
-  targets: [
-    // Target 1: Log everything to a file
-    {
-      level: "trace", // 'trace' is the most verbose level, logs everything.
-      target: "pino/file",
-      options: {
-        // Correct path: two levels up from /utils, then into /logs
-        destination: path.join(__dirname, "..", "..", "logs", "app.log"),
-        mkdir: true, // Create the directory if it doesn't exist
-      },
-    },
-    // Target 2: Log everything to the console in a pretty, colorful format
-    {
-      level: "trace", // Also log everything to the console during development
-      target: "pino-pretty",
-      options: {
-        colorize: true, // Enable colors
-        translateTime: "SYS:yyyy-mm-dd HH:MM:ss", // Prettier timestamp
-        ignore: "pid,hostname", // Don't show process ID and hostname
-      },
-    },
-  ],
-});
+const LOG_LEVELS = new Set([
+  "fatal",
+  "error",
+  "warn",
+  "info",
+  "debug",
+  "trace",
+  "silent",
+]);
+const requestedLevel = process.env.LOG_LEVEL?.toLowerCase();
+const level = LOG_LEVELS.has(requestedLevel) ? requestedLevel : "info";
 
-const logger = pino(transport);
+let consoleStream = process.stdout;
+if (process.stdout.isTTY && process.env.NODE_ENV !== "production") {
+  consoleStream = require("pino-pretty")({
+    colorize: true,
+    translateTime: "SYS:standard",
+  });
+}
+
+const streams = [{ level, stream: consoleStream }];
+if (process.env.LOG_FILE) {
+  streams.push({
+    level,
+    stream: pino.destination({
+      dest: path.resolve(process.env.LOG_FILE),
+      mkdir: true,
+      sync: false,
+    }),
+  });
+}
+
+const destination =
+  streams.length === 1 ? streams[0].stream : pino.multistream(streams);
+const logger = pino(
+  {
+    level,
+    redact: {
+      paths: [
+        "apiKey",
+        "*.apiKey",
+        "token",
+        "*.token",
+        "auth",
+        "*.auth",
+        "jid",
+        "*.jid",
+        "number",
+        "*.number",
+        "qr",
+        "*.qr",
+        "req.headers.x-api-key",
+        "headers.x-api-key",
+        "req.headers.authorization",
+        "headers.authorization",
+        "req.headers.cookie",
+        "headers.cookie",
+      ],
+      censor: "[REDACTED]",
+    },
+  },
+  destination,
+);
 
 module.exports = logger;

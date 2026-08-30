@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned to 24.x: the app refuses to boot on anything else because
+          # persistence relies on the built-in node:sqlite.
+          node-version-file: .nvmrc
+          cache: npm
+
+      # ffprobe supplies video dimensions and duration; without it those
+      # preview tests skip instead of running.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - run: npm ci
+
+      - name: Lint and format check
+        run: npm run ci
+
+      - name: Check documentation is in sync
+        run: npm run docs:check
+
+      - name: Test
+        run: npm test
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: whatsapp-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Boot the container and probe it
+        run: |
+          docker run -d --name ci -e API_KEY=ci-smoke-test-key -p 3000:3000 whatsapp-api:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/ >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3000/ | grep -q "WhatsApp API Server is running"
+          # /healthz is 503 until a WhatsApp session is linked, which CI has not
+          # done, so assert the shape rather than a 200.
+          curl -sS http://127.0.0.1:3000/healthz | grep -q '"whatsapp":"disconnected"'
+          docker rm -f ci
