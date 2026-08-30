@@ -69,6 +69,11 @@ Scan it with your WhatsApp mobile app to link the server to your account.
 
 A `.env` file is created automatically with the generated `API_KEY`.
 
+Every variable is parsed and range-checked when the process starts. An invalid
+value stops the server immediately with a message naming the variable — for
+example `MAX_PENDING_SENDS must be an integer between 1 and 1000.` — instead of
+silently falling back to the default.
+
 ---
 
 ## Authentication
@@ -596,6 +601,7 @@ whatsapp-api/
 ├── .env                              # API_KEY (auto-generated)
 ├── Dockerfile                        # Alpine image with ffmpeg, non-root, healthcheck
 ├── docker-compose.yml                # Single-replica service with a session volume
+├── biome.json                        # Formatter and linter (the only toolchain)
 ├── deploy/
 │   └── whatsapp-api.service          # Hardened systemd unit
 ├── scripts/
@@ -625,6 +631,7 @@ whatsapp-api/
         ├── AppError.js               # Custom operational error class
         ├── catchAsync.js             # Async error-catching wrapper for Express
         ├── channel.js                # Newsletter metadata normalization & role rules
+        ├── env.js                    # Boot-time config parsing; throws on bad values
         ├── idempotency.js             # Atomic SQLite request ledger
         ├── logger.js                 # Pino logger configuration
         ├── media.js                  # Media type mapping & payload builder

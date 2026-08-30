@@ -1,0 +1,69 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+      include: scope
+    groups:
+      # One PR per group keeps the review surface small; a failing CI run then
+      # points at a set of related bumps rather than a single mystery package.
+      production-dependencies:
+        dependency-type: production
+        update-types: ["minor", "patch"]
+      development-dependencies:
+        dependency-type: development
+        update-types: ["minor", "patch"]
+    ignore:
+      # Pinned to an exact release candidate. src/ contains deliberate
+      # workarounds for this build's newsletter media handling, its dropped
+      # mediatype attribute, and its deep module layout, all verified against
+      # rc14. Upgrading is a manual, tested operation — see CONTRIBUTING.md.
+      - dependency-name: "@whiskeysockets/baileys"
+
+      # chalk 5 dropped CommonJS and this project is CJS, so a major bump
+      # breaks require("chalk") at boot.
+      - dependency-name: chalk
+        update-types: ["version-update:semver-major"]
+
+      # Baileys declares audio-decode ^2.1.3 as a peer. A 3.x bump would leave
+      # the peer unsatisfied and silently break voice-note waveforms.
+      - dependency-name: audio-decode
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    labels: ["dependencies", "ci"]
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    labels: ["dependencies", "docker"]
+    commit-message:
+      prefix: chore
+    ignore:
+      # index.js refuses to boot on anything but Node 24.x, because persistence
+      # relies on the built-in node:sqlite. A base image major bump would
+      # produce an image that builds and then crashes on start.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]

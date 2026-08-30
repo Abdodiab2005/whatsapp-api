@@ -21,6 +21,10 @@ All notable changes to this project are documented here. The format follows
   environment variable is missing from `API_DOCS.md`, `README.md`, or the Postman
   collection.
 - `update-docs` skill and a `context7` MCP server entry for querying Baileys.
+- Dependabot for npm, GitHub Actions, and the Docker base image, with grouped
+  weekly PRs and explicit exclusions for the three deliberate pins.
+- A pull request template and issue routing that sends security reports to a
+  private advisory and Baileys protocol problems upstream.
 - [Biome](https://biomejs.dev) as the single formatter and linter, pinned exact
   so a minor bump cannot reformat the repo. `npm run check` locally, `biome ci`
   in the pipeline.
@@ -45,6 +49,12 @@ All notable changes to this project are documented here. The format follows
 
 - Node builtins are now imported with the `node:` prefix throughout, matching
   what the newer files already did.
+- `SEND_INTERVAL_MS`, `MAX_PENDING_SENDS`, and `LOG_LEVEL` silently fell back to
+  their defaults when set to an invalid value, so a typo left the server running
+  with limits the operator never chose. All configuration now goes through
+  `src/utils/env.js`, which throws at boot with a message naming the variable.
+  Two copies of `readInteger` with opposite failure behavior have been merged
+  into one.
 
 - Voice notes intermittently lost their waveform. `audio-type` and
   `audio-decode` sniff format through `new Uint8Array(buf.buffer)`, ignoring

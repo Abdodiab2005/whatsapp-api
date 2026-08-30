@@ -1,12 +1,6 @@
 const { setTimeout: delay } = require("node:timers/promises");
 const AppError = require("./AppError");
-
-function readInteger(value, fallback, { min, max }) {
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max
-    ? parsed
-    : fallback;
-}
+const { readInteger } = require("./env");
 
 function createSendQueue({ sendIntervalMs, maxPendingSends }) {
   let tail = Promise.resolve();
@@ -46,11 +40,11 @@ function createSendQueue({ sendIntervalMs, maxPendingSends }) {
 }
 
 const defaultQueue = createSendQueue({
-  sendIntervalMs: readInteger(process.env.SEND_INTERVAL_MS, 1000, {
+  sendIntervalMs: readInteger(process.env, "SEND_INTERVAL_MS", 1000, {
     min: 0,
     max: 60_000,
   }),
-  maxPendingSends: readInteger(process.env.MAX_PENDING_SENDS, 25, {
+  maxPendingSends: readInteger(process.env, "MAX_PENDING_SENDS", 25, {
     min: 1,
     max: 1000,
   }),

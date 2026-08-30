@@ -78,6 +78,26 @@ workaround, and those are worth keeping.
 Tests use `node:test` with `node:assert/strict`. New behavior needs a test that
 would fail without the change.
 
+## Dependencies
+
+Dependabot opens grouped weekly PRs. Three pins are deliberate and are excluded
+in `.github/dependabot.yml`; if you need to move one, do it in its own PR with
+the reasoning and a manual test:
+
+| Pin | Why |
+| --- | --- |
+| `@whiskeysockets/baileys` | Pinned to `7.0.0-rc14`. `src/` carries workarounds verified against this exact build. |
+| `chalk` | 5.x dropped CommonJS; this project is CJS, so a major bump breaks `require` at boot. |
+| `audio-decode` | Baileys declares `^2.1.3` as a peer. A 3.x bump breaks voice-note waveforms. |
+
+The Docker base image is held at Node 24 for the same reason `index.js` refuses
+to boot elsewhere: persistence uses the built-in `node:sqlite`.
+
+New configuration variables are read through `src/utils/env.js`, never
+`process.env` directly. Those readers throw at boot on an invalid value, which
+is deliberate — a silent fallback leaves an operator with limits they never
+chose and no way to notice.
+
 ## Commits
 
 Conventional commit prefixes (`feat:`, `fix:`, `docs:`, `test:`, `chore:`).

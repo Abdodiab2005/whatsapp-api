@@ -1,5 +1,6 @@
 const path = require("node:path");
 const pino = require("pino");
+const { readEnum } = require("./env");
 
 const LOG_LEVELS = new Set([
   "fatal",
@@ -10,8 +11,7 @@ const LOG_LEVELS = new Set([
   "trace",
   "silent",
 ]);
-const requestedLevel = process.env.LOG_LEVEL?.toLowerCase();
-const level = LOG_LEVELS.has(requestedLevel) ? requestedLevel : "info";
+const level = readEnum(process.env, "LOG_LEVEL", "info", LOG_LEVELS);
 
 let consoleStream = process.stdout;
 if (process.stdout.isTTY && process.env.NODE_ENV !== "production") {
